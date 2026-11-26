@@ -2,30 +2,38 @@ import { useEffect } from "react";
 import { MapContainer, TileLayer, CircleMarker, Polyline, Popup, Tooltip, useMap } from "react-leaflet";
 import { BOUNDS, LEVEL } from "../api.js";
 
-function Fit({ route, fit }) {
+function Fit({ target }) {
   const map = useMap();
-  const key = route ? route.id : "";
-  useEffect(() => { if (route && fit) map.fitBounds(route.path, { padding: [50, 50] }); }, [key]); // eslint-disable-line
+  const key = target ? target.id : "";
+  useEffect(() => { if (target) map.fitBounds(target.pts, { padding: [60, 60], maxZoom: 14 }); }, [key]); // eslint-disable-line
   return null;
 }
 
-export default function MapView({ network, routes = [], selected, incidents = [], labels = true, height = 340, fit = true }) {
+export default function MapView({ network, routes = [], selected, incidents = [], labels = true, height = 340, fit = true, highlight = null }) {
   const route = routes.find((r) => r.id === selected);
+  const alt = highlight && highlight.alt;
+  const target = highlight ? { id: "h" + highlight.id, pts: [...highlight.pos, ...(alt ? alt.path : [])] }
+    : route && fit ? { id: route.id, pts: route.path } : null;
   return (
     <MapContainer bounds={BOUNDS} boundsOptions={{ padding: [20, 20] }} scrollWheelZoom className="map" style={{ height }}>
       <TileLayer attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
         url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" />
       {route && <Polyline positions={route.path} pathOptions={{ color: "#1d4ed8", weight: 14, opacity: 0.4 }} />}
+      {network.edges.filter((e) => e.level === "grid").map((e) => (
+        <Polyline key={"p" + e.id} positions={e.pos} interactive={false} pathOptions={{ color: "#dc2626", weight: 16, opacity: 0.4, className: "pulse" }} />
+      ))}
       {network.edges.map((e) => (
-        <Polyline key={e.id} positions={e.pos} pathOptions={{ color: LEVEL[e.level].c, weight: 6, opacity: 0.9 }}>
+        <Polyline key={e.id} positions={e.pos} pathOptions={{ color: LEVEL[e.level].c, weight: 6, opacity: 0.95 }}>
           <Popup>
             <b>{e.road}</b><br />{e.from} → {e.to} · {e.km} km<br />
             Now: <b>{e.speed} km/h</b> ({LEVEL[e.level].t})<br />
-            +15 min: {e.forecast["15"]} · +30 min: {e.forecast["30"]} · +60 min: {e.forecast["60"]} km/h<br />
-            ~{e.vehicles} vehicles on segment
+            {e.pred ? <>In 15 min: {e.pred[2]} km/h · in 30 min: {e.pred[5]} km/h</> : "Prediction unavailable"}<br />
           </Popup>
         </Polyline>
       ))}
+      {alt && <Polyline positions={alt.path} interactive={false} pathOptions={{ color: "#fff", weight: 13, opacity: 0.95 }} />}
+      {alt && <Polyline positions={alt.path} interactive={false} pathOptions={{ color: alt.faster ? "#0d9f4f" : "#64748b", weight: 7, opacity: 1 }}>
+        <Tooltip sticky>{alt.name} · {alt.min} min</Tooltip></Polyline>}
       {routes.filter((r) => r.id !== selected).map((r) => (
         <Polyline key={r.id} positions={r.path} pathOptions={{ color: r.color, weight: 3, opacity: 0.8, dashArray: "2 8" }} />
       ))}
@@ -46,7 +54,7 @@ export default function MapView({ network, routes = [], selected, incidents = []
           <Tooltip>{k ? "Destination" : "Start"}</Tooltip>
         </CircleMarker>
       ))}
-      <Fit route={route} fit={fit} />
+      <Fit target={target} />
     </MapContainer>
   );
 }
@@ -55,7 +63,7 @@ export function Legend() {
   return (
     <div className="legend">
       {Object.values(LEVEL).map((l) => <span key={l.t}><i style={{ background: l.c }} />{l.t}</span>)}
-      <span>⚠ Incident</span><span>Click a road for details</span>
+      <span><i style={{ background: "#0d9f4f" }} />Suggested detour</span><span>⚠ Incident</span><span>Click a road for details</span>
     </div>
   );
 }

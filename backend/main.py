@@ -1,21 +1,28 @@
-"""Smart Traffic API (Gurugram).  Run: uvicorn main:app --reload --port 8000   Docs: /docs"""
-import asyncio
+"""Smart Traffic API (Gurugram, DEMO mode).  Run: uvicorn main:app --reload --port 8000   Docs: /docs"""
+import asyncio, time
 from contextlib import asynccontextmanager
+from datetime import datetime
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from engine import SENS, Engine
 
 eng = Engine()
+clients: set = set()
 
 
 async def ticker():
     while True:
         await asyncio.sleep(2)
         eng.step()
+        if clients:
+            msg = eng.dashboard()
+            for ws in list(clients):
+                try: await ws.send_json(msg)
+                except Exception: clients.discard(ws)
 
 
 @asynccontextmanager
@@ -25,7 +32,7 @@ async def lifespan(app):
     task.cancel()
 
 
-app = FastAPI(title="Smart Traffic API - Gurugram", lifespan=lifespan)
+app = FastAPI(title="Smart Traffic API - Gurugram (DEMO mode)", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 
@@ -33,18 +40,32 @@ class IncidentIn(BaseModel):
     edge_id: int
     severity: int = Field(2, ge=1, le=3)
     description: str = Field("Reported incident", max_length=120)
-    minutes: int = Field(10, ge=1, le=120)
+    minutes: int = Field(20, ge=1, le=120)   # demo-clock minutes
 
 
 class SettingsIn(BaseModel):
-    sensitivity: Optional[str] = None      # low | medium | high
-    sim_hour: Optional[float] = Field(None, ge=0, lt=24)
-    live_clock: Optional[bool] = None      # true = use the real clock
+    sensitivity: Optional[str] = None        # low | medium | high
+    sim_hour: Optional[float] = Field(None, ge=0, lt=24)   # jump the demo clock to this hour
 
 
 @app.get("/api/health")
 def health():
     return {"status": "ok", "tick": eng.tick}
+
+
+@app.get("/api/status")
+def status():
+    m = eng.model
+    return {
+        "backend": {"status": "connected", "uptime_s": round(time.time() - eng.started)},
+        "database": {"status": "unavailable", "detail": "No database is configured. State is held in memory and resets when the backend restarts."},
+        "neo4j": {"status": "unavailable", "detail": "Neo4j is not configured. Routing uses the in-memory road graph."},
+        "ml": {"status": "available" if eng.pred is not None else "unavailable", "error": eng.ml_error,
+               "model": eng.model_info()},
+        "websocket": {"status": "available", "clients": len(clients)},
+        "data": {"source": "DEMO", "sim_time": eng.dashboard()["sim_time"], "last_update": eng.last_update,
+                 "server_time": datetime.now().isoformat(timespec="seconds")},
+    }
 
 
 @app.get("/api/dashboard")
@@ -58,15 +79,24 @@ def nodes():
 
 
 @app.get("/api/route")
-def route(src: str, dst: str, horizon: int = Query(0, ge=0, le=60)):
+def route(src: str, dst: str, horizon: int = Query(0, ge=0, le=30)):
     if src not in eng.nodes or dst not in eng.nodes: raise HTTPException(404, "Unknown junction")
     if src == dst: raise HTTPException(400, "Source and destination must differ")
+    if horizon > 0 and eng.pred is None: raise HTTPException(503, "Prediction model unavailable")
     return {"src": src, "dst": dst, "horizon": horizon, "routes": eng.alternatives(src, dst, horizon)}
 
 
+@app.get("/api/prediction")
+def prediction():
+    p = eng.prediction()
+    if p is None: raise HTTPException(503, eng.ml_error or "Prediction model unavailable")
+    return p
+
+
 @app.get("/api/analytics")
-def analytics(period: str = Query("24h", pattern="^(24h|7d)$")):
-    return eng.analytics(period)
+def analytics():
+    try: return eng.analytics()
+    except RuntimeError as ex: raise HTTPException(503, str(ex))
 
 
 @app.get("/api/alerts")
@@ -97,7 +127,7 @@ def add_incident(body: IncidentIn):
 @app.delete("/api/incidents/{incident_id}")
 def clear_incident(incident_id: int):
     if incident_id not in eng.incidents: raise HTTPException(404, "Incident not found")
-    del eng.incidents[incident_id]; eng.step()
+    del eng.incidents[incident_id]; eng.refresh()
     return {"cleared": incident_id}
 
 
@@ -111,9 +141,8 @@ def put_settings(body: SettingsIn):
     if body.sensitivity is not None:
         if body.sensitivity not in SENS: raise HTTPException(400, "sensitivity must be low, medium or high")
         eng.settings["sensitivity"] = body.sensitivity
-    if body.live_clock: eng.settings["sim_hour"] = None
-    elif body.sim_hour is not None: eng.settings["sim_hour"] = body.sim_hour
-    eng.step()
+        eng.refresh()
+    if body.sim_hour is not None: eng.set_clock(body.sim_hour)
     return eng.settings
 
 
@@ -121,3 +150,31 @@ def put_settings(body: SettingsIn):
 def reset():
     eng.reset()
     return {"status": "reset"}
+
+
+@app.websocket("/ws")
+async def ws(socket: WebSocket):
+    await socket.accept(); clients.add(socket)
+    try:
+        await socket.send_json(eng.dashboard())
+        while True: await socket.receive_text()
+    except WebSocketDisconnect:
+        pass
+    finally:
+        clients.discard(socket)
+
+
+# ---- Serve the built React app (present in production / Docker as backend/static) ----
+from pathlib import Path
+from fastapi.responses import FileResponse
+
+STATIC = (Path(__file__).parent / "static").resolve()
+if (STATIC / "index.html").exists():
+    @app.get("/{path:path}", include_in_schema=False)
+    def frontend(path: str):
+        if path.startswith("api/") or path == "ws":
+            raise HTTPException(404, "Not found")
+        f = (STATIC / path).resolve()
+        if path and f.is_file() and STATIC in f.parents:
+            return FileResponse(f)
+        return FileResponse(STATIC / "index.html")

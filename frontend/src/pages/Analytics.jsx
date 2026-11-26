@@ -1,56 +1,37 @@
 import { useEffect, useState } from "react";
-import { api, LEVEL } from "../api.js";
-import { AreaChart, Bars } from "../components/Charts.jsx";
+import { api } from "../api.js";
+import { HourBars, StackBar } from "../components/Charts.jsx";
+import { Empty, Unavailable, Demo } from "../components/ui.jsx";
+import { LEVEL } from "../api.js";
 
 export default function Analytics({ data }) {
-  const [period, setPeriod] = useState("24h");
-  const [a, setA] = useState(null);
-  const bucket = Math.floor(data.tick / 10);
-  useEffect(() => { api.analytics(period).then(setA).catch(() => {}); }, [period, bucket]);
-  if (!a) return <div className="card">Loading analytics…</div>;
-  const roads = {};
-  data.network.edges.forEach((e) => (roads[e.road] ||= []).push(e));
+  const [a, setA] = useState(null), [err, setErr] = useState(null);
+  const bucket = Math.floor(data.tick / 20);
+  useEffect(() => { api.analytics().then((r) => { setA(r); setErr(null); }).catch((e) => setErr(e.message)); }, [bucket]);
+  if (err) return <Unavailable title="Analytics unavailable">{err}</Unavailable>;
+  if (!a) return <Empty>Loading analytics…</Empty>;
+  const diff = a.now - a.typical_now;
+  const colors = Object.fromEntries(Object.entries(LEVEL).map(([k, v]) => [k, v.c])), names = Object.fromEntries(Object.entries(LEVEL).map(([k, v]) => [k, v.t]));
   return (
     <>
-      <section className="kpis">
-        <div className="card kpi"><div className="kpi-txt"><b>{a.avg}%</b><span>Average congestion</span></div></div>
-        <div className="card kpi"><div className="kpi-txt"><b>{a.peak.value}% at {a.peak.label}</b><span>Busiest {period === "7d" ? "day" : "hour"}</span></div></div>
-        <div className="card kpi"><div className="kpi-txt"><b>{a.low.value}% at {a.low.label}</b><span>Quietest {period === "7d" ? "day" : "hour"}</span></div></div>
-        <div className="card kpi"><div className="kpi-txt"><b>{data.prediction[0].v}%</b><span>Predicted in 15 min</span></div></div>
+      <p className="note" style={{ marginTop: 0 }}>Source: {a.source} ({a.days} days of simulated 5-minute readings). It shows typical patterns, not real measurements. <Demo /></p>
+      <section className="grid g3">
+        <div className="card kpi"><span className="lbl">Congestion now</span><b>{a.now}%</b><small>0% = free flowing, 100% = at a standstill</small></div>
+        <div className="card kpi"><span className="lbl">Typical for this hour</span><b>{a.typical_now}%</b><small>Average at {a.labels[a.current_hour]} in the demo history</small></div>
+        <div className="card kpi"><span className="lbl">Compared with typical</span><b className={diff > 5 ? "down" : diff < -5 ? "up" : "flat"}>{diff > 5 ? "Busier" : diff < -5 ? "Quieter" : "About normal"}</b><small>{diff > 0 ? "+" : ""}{Math.round(diff)} percentage points</small></div>
       </section>
-      <div className="grid">
-        <div className="col">
-          <section className="card">
-            <div className="ch"><h3>Congestion index</h3>
-              <select value={period} onChange={(e) => setPeriod(e.target.value)} aria-label="Period">
-                <option value="24h">Last 24 hours</option><option value="7d">Last 7 days</option></select></div>
-            <AreaChart labels={a.labels} values={a.values} />
-          </section>
-          <section className="card">
-            <h3 style={{ marginBottom: 12 }}>Speed forecast by segment (km/h)</h3>
-            <div className="tablewrap"><table>
-              <thead><tr><th>Road</th><th>Segment</th><th>Now</th><th>+15</th><th>+30</th><th>+60</th></tr></thead>
-              <tbody>{data.network.edges.map((e) => (
-                <tr key={e.id}><td>{e.road}</td><td>{e.from} → {e.to}</td>
-                  <td><span className="chip" style={{ background: LEVEL[e.level].c }}>{e.speed}</span></td>
-                  {["15", "30", "60"].map((h) => <td key={h}>{e.forecast[h]}</td>)}</tr>))}</tbody>
-            </table></div>
-          </section>
-        </div>
-        <div className="col">
-          <section className="card">
-            <h3 style={{ marginBottom: 12 }}>Busiest roads (typical day)</h3>
-            <Bars items={a.roads.map((r) => ({ label: r.road, value: r.avg }))} />
-          </section>
-          <section className="card">
-            <h3 style={{ marginBottom: 12 }}>Right now vs typical peak</h3>
-            <div className="tablewrap"><table>
-              <thead><tr><th>Road</th><th>Now</th><th>Peak hour</th></tr></thead>
-              <tbody>{a.roads.map((r) => <tr key={r.road}><td>{r.road}</td><td>{r.now}%</td><td>{r.peak}</td></tr>)}</tbody>
-            </table></div>
-          </section>
-        </div>
-      </div>
+      <section className="grid g2 mt">
+        <div className="card"><h3>Typical congestion by hour of day</h3><HourBars labels={a.labels} values={a.hourly} current={a.current_hour} />
+          <p className="note">The cyan bar is the current hour. Morning and evening peaks are visible.</p></div>
+        <div className="card"><h3>How often each level occurs</h3><StackBar dist={a.distribution} colors={colors} names={names} />
+          <p className="note">Share of all segment readings in the demo history.</p></div>
+      </section>
+      <section className="card mt"><h3>Roads compared</h3>
+        <div className="tablewrap"><table><thead><tr><th>Road</th><th>Segments</th><th>Average speed</th><th>Time congested</th><th>Busiest hour</th></tr></thead>
+          <tbody>{a.roads.map((r) => <tr key={r.road}><td>{r.road}</td><td>{r.segments}</td><td className="num">{r.avg_speed} of {r.free} km/h</td>
+            <td className="num">{r.congested_pct}%</td><td>{r.peak} ({r.peak_congestion}%)</td></tr>)}</tbody></table></div>
+        <p className="note">“Time congested” = share of readings where traffic moved at less than half of free-flow speed.</p>
+      </section>
     </>
   );
 }
